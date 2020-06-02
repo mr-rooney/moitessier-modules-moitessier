@@ -1455,11 +1455,12 @@ void moitessier_processReqData(void)
                     /* verify if message is GNSS related */
                     if(talkerId[0] == '$' && talkerId[1] == 'G' && (talkerId[2] == 'P' || talkerId[2] == 'N' || talkerId[2] == 'L'))
                     {
-                        char sentence[3];
+                        char sentence[4];
                         
                         processData = false;
                         
-                        memcpy(sentence, &moitessier_spi->rxBuf[headerPos + HEADER_size() + sizeof(talkerId)], sizeof(sentence));
+                        memcpy(sentence, &moitessier_spi->rxBuf[headerPos + HEADER_size() + sizeof(talkerId)], sizeof(sentence)-1);
+			sentence[sizeof(sentence)-1] = '\0';
                         
                         /* verify if we should proceed the sentence */
                         if(strcmp(sentence, "RMC") == 0 && (config.gnssMsgEnabled & GNSS_MSG_RMC))
