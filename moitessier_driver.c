@@ -172,7 +172,12 @@
 #include <linux/reboot.h>
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+
+//#if !defined(KERNEL_VERSION_ALT)
+#define KERNEL_VERSION_ALT(a,b,c) (((a) << 16) + ((b) << 8) + (c))
+//#endif /* KERNEL_VERSION_ALT */
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION_ALT(4, 11, 0)
 #include <linux/signal.h>
 #include <linux/sched/signal.h>
 #endif
@@ -319,6 +324,7 @@ MODULE_PARM_DESC(DO_SHUTDOWN, "If set, the Moitessier HAT requests a system shut
 #define GNSS_MSG_GSV                (1 << 4)
 #define GNSS_MSG_GLL                (1 << 5)
 #define GNSS_MSG_TXT                (1 << 6)
+#define GNSS_MSG_GSV                (1 << 7)
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
@@ -500,8 +506,13 @@ static wait_queue_head_t        wq_read;
 static wait_queue_head_t        wq_thread;
 static struct task_struct       *thread_id;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION_ALT(5, 9, 0)
+static void irq_tasklet(struct tasklet_struct *t);
+DECLARE_TASKLET(irq_tl, irq_tasklet);
+#else
 static void irq_tasklet(unsigned long data);
 DECLARE_TASKLET(irq_tl, irq_tasklet, 0);
+#endif /* LINUX_VERSION_CODE */
 
 static atomic_t irqOccured=ATOMIC_INIT(0);
 
@@ -523,9 +534,9 @@ static struct st_moitessierSpi_serial *moitessier_serial;
 static struct class *moitessier_tty_class;
 static struct device *moitessier_tty_dev;
 #define MOITESSIER_TTY_MAJOR            240
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+//#if LINUX_VERSION_CODE >= KERNEL_VERSION_ALT(4, 15, 0)
 #define MOITESSIER_TTY_MINOR_START      16
-#endif /* LINUX_VERSION_CODE */
+//#endif /* LINUX_VERSION_CODE */
 #endif /* USE_TTY */
 
 #if defined(SUPPORT_KEEP_ALIVE)
@@ -874,6 +885,7 @@ static long moitessier_ctrl_ioctl(struct file *filp, unsigned int cmd, unsigned 
                 pr_warn("\t\tGSV: %s\n", (config.gnssMsgEnabled & GNSS_MSG_GSV) ? "enabled" : "disabled");
                 pr_warn("\t\tGLL: %s\n", (config.gnssMsgEnabled & GNSS_MSG_GLL) ? "enabled" : "disabled");   
                 pr_warn("\t\tTXT: %s\n", (config.gnssMsgEnabled & GNSS_MSG_TXT) ? "enabled" : "disabled");       
+                pr_warn("\t\tGSV: %s\n", (config.gnssMsgEnabled & GNSS_MSG_GSV) ? "enabled" : "disabled");       
             }
             break;            
         default:
@@ -1037,7 +1049,7 @@ static void keepAlive_queueFunc(struct work_struct *work)
     moitessier_resetHAT(10);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)  
+#if LINUX_VERSION_CODE >= KERNEL_VERSION_ALT(4, 14, 0)  
 static void moitessier_keepAlive(struct timer_list *t)
 #else
 static void moitessier_keepAlive(unsigned long dat)
@@ -1453,13 +1465,14 @@ void moitessier_processReqData(void)
                     memcpy(talkerId, &moitessier_spi->rxBuf[headerPos + HEADER_size() + 0], sizeof(talkerId));
                     
                     /* verify if message is GNSS related */
-                    if(talkerId[0] == '$' && talkerId[1] == 'G' && (talkerId[2] == 'P' || talkerId[2] == 'N' || talkerId[2] == 'L'))
+                    if(talkerId[0] == '$' && talkerId[1] == 'G' && (talkerId[2] == 'P' || talkerId[2] == 'N' || talkerId[2] == 'L' || talkerId[2] == 'A'))
                     {
                         char sentence[4];
+                        sentence[3] = 0;
                         
                         processData = false;
                         
-                        memcpy(sentence, &moitessier_spi->rxBuf[headerPos + HEADER_size() + sizeof(talkerId)], sizeof(sentence)-1);
+                        memcpy(sentence, &moitessier_spi->rxBuf[headerPos + HEADER_size() + sizeof(talkerId)], 3);
 			sentence[sizeof(sentence)-1] = '\0';
                         
                         /* verify if we should proceed the sentence */
@@ -1476,7 +1489,9 @@ void moitessier_processReqData(void)
                         if(strcmp(sentence, "GLL") == 0 && (config.gnssMsgEnabled & GNSS_MSG_GLL))
                             processData = true; 
                         if(strcmp(sentence, "TXT") == 0 && (config.gnssMsgEnabled & GNSS_MSG_TXT))
-                            processData = true;                             
+                            processData = true;  
+                        if(strcmp(sentence, "GSV") == 0 && (config.gnssMsgEnabled & GNSS_MSG_GSV))
+                            processData = true;                            
                     }
                 }
             }
@@ -1642,8 +1657,12 @@ static int moitessier_thread(void *data)
     
     complete_and_exit(&on_exit, 0);
 }
-   
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION_ALT(5, 9, 0)
+static void irq_tasklet(struct tasklet_struct *t)
+#else   
 static void irq_tasklet(unsigned long data)
+#endif /* LINUX_VERSION_CODE */
 {
     unsigned int irq = atomic_read(&irqOccured);
     unsigned int i = 0;
@@ -2180,6 +2199,9 @@ static int __init moitessier_init(void)
     int rc = 0;
     
     if(DEBUG_LEVEL >= LEVEL_INFO)
+        pr_info("%s, linux version code: %d\n", __func__, LINUX_VERSION_CODE);
+    
+    if(DEBUG_LEVEL >= LEVEL_INFO)
         pr_info("%s\n", __func__);
 
 #if defined(USE_TTY)	
@@ -2276,15 +2298,18 @@ static int __init moitessier_init(void)
 	moitessier_tty_driver->owner = THIS_MODULE;
 	moitessier_tty_driver->driver_name = DEVICE_NAME_TTY;
 	moitessier_tty_driver->name = DEVICE_NAME_TTY;
-	moitessier_tty_driver->major = MOITESSIER_TTY_MAJOR,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
-	moitessier_tty_driver->minor_start = MOITESSIER_TTY_MINOR_START,    /* if not set, there will be returned a busy error during tty_register_driver(...) */
+#if LINUX_VERSION_CODE < KERNEL_VERSION_ALT(5, 0, 0)	
+	moitessier_tty_driver->major = MOITESSIER_TTY_MAJOR;
+#endif /* LINUX_VERSION_CODE */	
+	
+#if LINUX_VERSION_CODE >= KERNEL_VERSION_ALT(4, 15, 0)
+	moitessier_tty_driver->minor_start = MOITESSIER_TTY_MINOR_START;    /* if not set, there will be returned a busy error during tty_register_driver(...) */
 	                                                                    /* currently it is not sure since which kernel version this issue has occured */
 	                                                                    /* see https://devtalk.nvidia.com/default/topic/941448/problem-with-loading-module-via-modprobe/ */
 #endif /* LINUX_VERSION_CODE */	
-	moitessier_tty_driver->type = TTY_DRIVER_TYPE_SYSTEM,
-	moitessier_tty_driver->subtype = SYSTEM_TYPE_CONSOLE,
-	moitessier_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV | TTY_DRIVER_UNNUMBERED_NODE,
+	moitessier_tty_driver->type = TTY_DRIVER_TYPE_SYSTEM;
+	moitessier_tty_driver->subtype = SYSTEM_TYPE_CONSOLE;
+	moitessier_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV | TTY_DRIVER_UNNUMBERED_NODE;
 	moitessier_tty_driver->init_termios = tty_std_termios;
 	moitessier_tty_driver->init_termios.c_cflag = B115200 | CS8 | CREAD | HUPCL | CLOCAL;
 	moitessier_tty_driver->init_termios.c_lflag &= ~ECHO;
@@ -2408,7 +2433,7 @@ static int __init moitessier_init(void)
     wq = create_workqueue("KEEP ALIVE");
     /* initialize a timer that is used to check communication to the Moitessier HAT */
     spin_lock_init(&timerKeepAlive_spinlock);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)    
+#if LINUX_VERSION_CODE >= KERNEL_VERSION_ALT(4, 14, 0)    
     timer_setup(&timerKeepAlive, moitessier_keepAlive, 0);
 #else
     init_timer(&timerKeepAlive);
